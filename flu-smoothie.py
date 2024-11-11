@@ -178,7 +178,8 @@ def fit(data,hj_predictions):
     rng_key    = jax.random.PRNGKey(20201017)
     final_size = jnp.nanmean(jnp.nansum( data_for_optim, axis=1 )) 
 
-    @st.cache_data
+    #@st.cache_data
+    @st.cache_resource
     def initialrun():
         #--inital values
         mcmc_init = MCMC(
