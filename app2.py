@@ -37,15 +37,12 @@ def fit(data,hj_predictions):
     user_input             =  jnp.array(hj_predictions).reshape(1,33)
     empty_input            =  jnp.full_like(user_input, jnp.nan)
     training_data          =  np.vstack([data_for_optim, user_input, empty_input ])
+
+    training_data = training_data+0.5
     
-    def model(data, final_size):
-        season_plate = numpyro.plate("season", dim=-2,size=data.shape[0])
-        times_plate  = numpyro.plate("times" , dim=-1,size=data.shape[1])
+    def ode(beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0,ntimes):
+        initial_state = jnp.array([S0.reshape(1,), E0.reshape(1,),I0.reshape(1,), H0.reshape(1,), R0.reshape(1,), h0.reshape(1,)])
 
-        nseasons,ntimes = data.shape
-        times           = jnp.arange(ntimes)
-
-        #@jit
         def R0_time_dep(t,R0,center,spread):
             return R0*(1+(jax.scipy.stats.norm.pdf(t,center,spread) / jax.scipy.stats.norm.pdf(center,center,spread)))
  
@@ -54,7 +51,7 @@ def fit(data,hj_predictions):
             R0,center,spread, gamma1,gamma2,theta,eta = args
 
             beta = R0_time_dep(t,R0,center,spread)
-            
+
             dSdt = -beta * S * I 
             dEdt =  beta * S * I    - theta*E 
             dIdt = theta*E          - gamma1 * I
@@ -63,7 +60,6 @@ def fit(data,hj_predictions):
             dCdt = eta*gamma1*I
             return jnp.array([dSdt, dEdt, dIdt, dHdt, dRdt, dCdt])
 
-        # Set up the ODE term for the differential equation
         ode_term = ODETerm(sir_model)
 
         # Set up the solver with parameters
@@ -74,37 +70,53 @@ def fit(data,hj_predictions):
         dt      = 1./7        
         save_at = SaveAt(ts=jnp.arange(t0, t1, 1))
 
-        def ode(beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0):
-            initial_state = jnp.array([S0.reshape(1,), E0.reshape(1,),I0.reshape(1,), H0.reshape(1,), R0.reshape(1,), h0.reshape(1,)])
-            
-            # Run the solver
-            solution = diffeqsolve(
-                ode_term,
-                solver,
-                t0     = t0,
-                t1     = t1,
-                dt0    = dt,
-                y0     = initial_state,
-                args   = (beta, center,spread, gamma1,gamma2,theta,eta),
-                saveat = save_at)
-            C = solution.ys[:,-1,0]
-            inc           = jnp.diff(C)
-            return inc
-        
-        phi           = numpyro.sample("phi", dist.Beta(1,1))
+        # Run the solver
+        solution = diffeqsolve(
+            ode_term,
+            solver,
+            t0     = t0,
+            t1     = t1,
+            dt0    = dt,
+            y0     = initial_state,
+            args   = (beta, center,spread, gamma1,gamma2,theta,eta),
+            saveat = save_at)
+        C = solution.ys[:,-1,0]
+        inc           = jnp.diff(C)
+        return inc
 
-        beta          = numpyro.sample("beta"           , dist.Beta(1,1))
+    
+    def model(data, final_size):
+        season_plate = numpyro.plate("season", dim=-2,size=data.shape[0])
+        times_plate  = numpyro.plate("times" , dim=-1,size=data.shape[1])
+
+        nseasons,ntimes = data.shape
+        times           = jnp.arange(ntimes)
+
+        #@jit
+        # Set up the ODE term for the differential equation
+      
+        phi           = numpyro.sample("phi", dist.Normal(0,100))
+        phi          = jax.scipy.special.expit(phi)
+
+        beta          = numpyro.sample("beta"           , dist.Normal(0,100))
+        beta          = jax.scipy.special.expit(beta)
+        
+
         beta_sigma    = numpyro.sample("beta_sigma"     , dist.HalfCauchy(100) )
 
-        gamma1        = numpyro.sample("gamma1"         , dist.Gamma(2,1))
-        gamma2        = numpyro.sample("gamma2"         , dist.Gamma(2,1))
+        gamma1         = numpyro.sample("gamma1"          , dist.Normal(jnp.log(2),100) )
+        gamma1         = jnp.exp(gamma1) 
+
+        gamma2         = numpyro.sample("gamma2"          , dist.Normal(jnp.log(2),100) )
+        gamma2         = jnp.exp(gamma2) 
+
+        eta           = numpyro.sample("eta"            , dist.Normal(0,100) )
+        eta           = jax.scipy.special.expit(eta)
         
-        eta           = numpyro.sample("eta"            , dist.Beta(1,1))
-        
-        theta         = numpyro.sample("theta"          , dist.Gamma(2,1))
+        theta         = numpyro.sample("theta"          , dist.Normal(jnp.log(2),100) )
+        theta         = jnp.exp(theta) 
         
         center        = numpyro.sample("center"         , dist.Normal(0,10**3))
-        center        = 33*jax.scipy.special.expit(center)
         
         spread        = numpyro.sample("spread"         , dist.Uniform(0,33))
         
@@ -114,63 +126,119 @@ def fit(data,hj_predictions):
         S0,E0,I0,R0,H0,h0 = inits
 
         #--season level
-        sigma_rw          = numpyro.sample("sigma_rw"         , dist.Gamma(2,0.02) )
-        increments_season = numpyro.sample("increments_season", dist.Normal(0,1./jnp.sqrt(sigma_rw)).expand([1,33]) )
+
+        prec_a, prec_b    = numpyro.sample("prec_a"            , dist.Exponential(100**2) ), numpyro.sample("prec_b"       , dist.Exponential(1) )
+        sigma_rw          =  numpyro.sample("sigma_rw"         , dist.Gamma(prec_a, prec_b) )
+        increments_season = numpyro.sample("increments_season" , dist.Normal(0,1./jnp.sqrt(sigma_rw)).expand([1,33]) )
         z_season          = jnp.cumsum(increments_season,axis=-1)[:,::-1]
 
-        with season_plate:
-            beta       = numpyro.sample("beta_season", dist.Beta(beta*(beta_sigma), (1-beta)*(beta_sigma) ) )
-            beta       = 10*beta
-            
-            incs   = jax.vmap( ode, in_axes = (0,None,None, None, None, None,None,None,None,None,None,None,None) )( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0 )
 
-            N = final_size*10
-            curve = (phi*(N) )*jax.scipy.special.expit( jax.scipy.special.logit(incs) + z_season  ) + eps
-            numpyro.deterministic("curve", curve)
+        weights_for_rw__strength = numpyro.sample("weights_for_rw__strength", dist.Gamma(2,2) )
+        prec_as                   = numpyro.sample("prec_as", dist.Gamma( 5,1) )
+        prec_bs                   = numpyro.sample("prec_bs", dist.Gamma( 1,10 ) )
+        with season_plate:
+            beta       = 10*beta
+
+            #incs   = jax.vmap( ode, in_axes = (0,None,None, None, None, None,None,None,None,None,None,None,None) )( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0 )
+            incs   = ode( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0,ntimes )
+
+            weights_for_rw   = numpyro.sample("weights_for_rw"  , dist.TruncatedNormal( jax.scipy.special.logit(0.95), weights_for_rw__strength
+                                                                                        , low = jax.scipy.special.logit(0.02), high=jax.scipy.special.logit(0.98)   ) )
+            weights_for_rw   = jax.scipy.special.expit(weights_for_rw)
+
+            def multiply(carry,array):
+                return carry*carry, carry
+            weights_for_rw = jax.vmap( lambda weight:  jax.lax.scan( multiply
+                                                                     ,init = weight
+                                                                     ,xs   = jnp.arange(ntimes) )[-1]  ) (weights_for_rw)
+            weights_for_rw = weights_for_rw.reshape(nseasons,ntimes)
+            random_walk_sigma           = numpyro.sample("random_walk_sigma", dist.Gamma( prec_as, prec_bs ) )
 
             with times_plate:
+                increments              = numpyro.sample("increments_for_time" , dist.Normal(0, 1./jnp.sqrt(random_walk_sigma)))
+                increments              = increments.at[:,0].set( -jax.scipy.special.logit( jnp.repeat(incs[-1], nseasons) ) ) #--this makes sure the sum below end at logit(season)
+
+                #print(increments)
+                
+                increments              = increments*weights_for_rw
+                random_walk_adjustment  = jnp.cumsum(increments,axis=-1)[:,::-1]
+
+                #print(random_walk_adjustment)
+
+                N = final_size*10
+                curve =  (phi*(N) )*( eps + jax.scipy.special.expit( jax.scipy.special.logit(incs) + z_season + random_walk_adjustment  ) )
+
+                numpyro.deterministic("curve", curve)
+                
                 with numpyro.handlers.mask(mask=~jnp.isnan(data)):
                     numpyro.sample("obs", dist.NegativeBinomial2( jnp.clip(curve,10**-5,jnp.inf), sigma), obs = data)
 
-    num_warmup  = 1000 
-    num_samples = 4000
-    num_chains  = 1
 
-    from  numpyro.infer import MCMC, NUTS, init_to_value, init_to_median, init_to_sample,init_to_uniform
+    from  numpyro.infer import MCMC, NUTS, HMC, init_to_value, init_to_median, init_to_sample,init_to_uniform
+    rng_key    = jax.random.PRNGKey(20201017)
+    final_size = jnp.nanmean(jnp.nansum( data_for_optim, axis=1 )) 
 
+    @st.cache_data
+    def initialrun():
+        #--inital values
+        mcmc_init = MCMC(
+        NUTS(model
+             , dense_mass             = False
+             , max_tree_depth         = 2
+             , regularize_mass_matrix = True
+             , init_strategy          = init_to_value())
+        , num_warmup  = 5000
+        , num_samples = 10000
+        , num_chains  = 1
+        , thinning    = 2
+        )
+        #--MCMC RUN
+        mcmc_init.run(rng_key
+                  , data = jnp.vstack([data_for_optim+0.5, empty_input, empty_input])
+                  , final_size = final_size
+                 )
+        samples__init = mcmc_init.get_samples()
+        
+        init_params = {name: np.mean(value,0) for name, value in samples__init.items()}
+        return init_params
+    init_params = initialrun()
+
+    #--now with users
     mcmc = MCMC(
     NUTS(model
          , dense_mass             = False
          , max_tree_depth         = 2
          , regularize_mass_matrix = True
-         , init_strategy          = init_to_value())
-    , num_warmup  = num_warmup
-    , num_samples = num_samples
-    , num_chains  = num_chains
+         , init_strategy          = init_to_value(values = init_params))
+    , num_warmup  = 500
+    , num_samples = 3000
+    , num_chains  = 1
     , thinning    = 2
     )
-  
-    rng_key = jax.random.PRNGKey(20201017)
-
-    final_size = jnp.nanmean(jnp.nansum( data_for_optim, axis=1 )) 
 
     #--MCMC RUN
     mcmc.run(rng_key
-             ,data = training_data
+             , data = training_data
              , final_size = final_size
              )
-    samples = mcmc.get_samples()
-    mcmc.print_summary()
+    samples =  mcmc.get_samples()
 
     predictive  = Predictive(model, posterior_samples=samples)
     predictions = predictive(rng_key
                              , data =  training_data
                              , final_size = final_size
                              )
+    
     _2p5,_10,_25,_50,_75,_90,_97p5 = np.percentile( predictions["curve"][:,-1,:] , [2.5,10,25,50,75,90,97.5], axis=0 )
+    print(_50)
     forecast_data =  pd.DataFrame({ "eweek":np.arange(1,33+1), "_2p5":_2p5, "_10":_10,"_25":_25, "_75":_75,"_90":_90, "_97p5":_97p5, "_50":_50 } )
 
-    return forecast_data
+
+    _2p5,_10,_25,_50,_75,_90,_97p5 = np.percentile( predictions["curve"][:,-2,:] , [2.5,10,25,50,75,90,97.5], axis=0 )
+    print(_50)
+    forecast_data__user =  pd.DataFrame({ "eweek":np.arange(1,33+1), "_2p5":_2p5, "_10":_10,"_25":_25, "_75":_75,"_90":_90, "_97p5":_97p5, "_50":_50 } )
+   
+    return forecast_data, forecast_data__user
 
 if __name__ == "__main__":
     
@@ -217,8 +285,6 @@ if __name__ == "__main__":
     pa_hosps = load_data()
     pa_hosps = pa_hosps.loc[pa_hosps.season!="offseason"]
 
-    #col2 = st.columns([5])
-    
     from streamlit_vertical_slider import vertical_slider
 
     line_chart = alt.Chart(pa_hosps).mark_line().encode(
@@ -238,6 +304,10 @@ if __name__ == "__main__":
                   ,alt.Tooltip('season', title='Season')]  # Tooltips for interactivity
     )
 
+
+    intro = st.container()
+    
+    
     cols = st.columns([1]*33)
     hj_predictions = []
 
@@ -281,8 +351,8 @@ if __name__ == "__main__":
     if st.session_state["button_clicked"]:
         st.session_state["button_clicked"] = False
         
-        with st.spinner(text="Blending the data and your prediction..."):
-            forecast_data = fit(pa_hosps, hj_predictions = hj_predictions)
+        with st.spinner(text="Blending the data and your prediction (about 1min)..."):
+            forecast_data, forecast_data__user = fit(pa_hosps, hj_predictions = hj_predictions)
 
         #--create plot
         fill_between1 = alt.Chart(forecast_data).mark_area(opacity=0.2).encode(
@@ -302,11 +372,37 @@ if __name__ == "__main__":
         )
         line_chart__chimeric = alt.Chart(forecast_data).mark_line().encode(
         x=alt.X('eweek', title='Epidemic week'),  # Custom x-axis label
-        y=alt.Y('_50', title='Your prediction'),
+        y=alt.Y('_50', title=''),
         tooltip=['eweek', '_50']  # Tooltips for interactivity
         )
 
-        combined_chart1 = (line_chart + scatter_chart+fill_between1+fill_between2+fill_between3 + line_chart__chimeric).properties(
+        #--create plot
+        fill_between1__U = alt.Chart(forecast_data__user).mark_area(opacity=0.2).encode(
+            x='eweek',
+            y='_2p5',
+            y2='_97p5'
+            ,color = alt.value('yellow')
+        )
+        fill_between2__U = alt.Chart(forecast_data__user).mark_area(opacity=0.2).encode(
+            x='eweek',
+            y='_25',
+            y2='_75'
+            ,color = alt.value('yellow')
+        )
+        fill_between3__U = alt.Chart(forecast_data__user).mark_area(opacity=0.2).encode(
+            x='eweek',
+            y='_10',
+            y2='_90'
+            ,color = alt.value('yellow')
+        )
+        line_chart__U = alt.Chart(forecast_data__user).mark_line().encode(
+        x=alt.X('eweek', title='Epidemic week'),  # Custom x-axis label
+        y=alt.Y('_50', title=''),
+        tooltip=['eweek', '_50']  # Tooltips for interactivity
+            ,color = alt.value('yellow')
+        )
+
+        combined_chart1 = (line_chart + scatter_chart+fill_between1+fill_between2+fill_between3 + line_chart__hj+ line_chart__chimeric + fill_between1__U + fill_between2__U+ fill_between3__U + line_chart__U ).properties(
             title="Incident hospitalizations in PA"
         ).interactive()  # Enables zooming and panning
 
