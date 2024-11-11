@@ -96,14 +96,11 @@ def fit(data,hj_predictions):
         # Set up the ODE term for the differential equation
       
         phi           = numpyro.sample("phi", dist.Normal(0,100))
-        phi          = jax.scipy.special.expit(phi)
+        phi           = jax.scipy.special.expit(phi)
 
         beta          = numpyro.sample("beta"           , dist.Normal(0,100))
-        beta          = jax.scipy.special.expit(beta)
-        
-
         beta_sigma    = numpyro.sample("beta_sigma"     , dist.HalfCauchy(100) )
-
+        
         gamma1         = numpyro.sample("gamma1"          , dist.Normal(jnp.log(2),100) )
         gamma1         = jnp.exp(gamma1) 
 
@@ -117,8 +114,11 @@ def fit(data,hj_predictions):
         theta         = jnp.exp(theta) 
         
         center        = numpyro.sample("center"         , dist.Normal(0,10**3))
+        center_sigma    = numpyro.sample("center_sigma" , dist.HalfCauchy(100) )
         
-        spread        = numpyro.sample("spread"         , dist.Uniform(0,33))
+        #spread        = numpyro.sample("spread"         , dist.Uniform(0,33))
+        spread        = numpyro.sample("spread"         , dist.Normal(0,10**3))
+        spread_sigma    = numpyro.sample("spread_sigma" , dist.HalfCauchy(100) )
         
         sigma         = numpyro.sample("sigma",dist.HalfCauchy(100.))
 
@@ -127,20 +127,29 @@ def fit(data,hj_predictions):
 
         #--season level
 
-        prec_a, prec_b    = numpyro.sample("prec_a"            , dist.Exponential(100**2) ), numpyro.sample("prec_b"       , dist.Exponential(1) )
-        sigma_rw          =  numpyro.sample("sigma_rw"         , dist.Gamma(prec_a, prec_b) )
-        increments_season = numpyro.sample("increments_season" , dist.Normal(0,1./jnp.sqrt(sigma_rw)).expand([1,33]) )
-        z_season          = jnp.cumsum(increments_season,axis=-1)[:,::-1]
+        prec_a, prec_b    =  numpyro.sample("prec_a"            , dist.Exponential(100**2) ), numpyro.sample("prec_b"       , dist.Exponential(1) )
+        sigma_rw          =  numpyro.sample("sigma_rw"          , dist.Gamma(prec_a, prec_b) )
+        increments_season =  numpyro.sample("increments_season" , dist.Normal(0,1./jnp.sqrt(sigma_rw)).expand([1,33]) )
+        z_season          =  jnp.cumsum(increments_season,axis=-1)[:,::-1]
 
 
-        weights_for_rw__strength = numpyro.sample("weights_for_rw__strength", dist.Gamma(2,2) )
+        weights_for_rw__strength  = numpyro.sample("weights_for_rw__strength", dist.Gamma(2,2) )
         prec_as                   = numpyro.sample("prec_as", dist.Gamma( 5,1) )
         prec_bs                   = numpyro.sample("prec_bs", dist.Gamma( 1,10 ) )
         with season_plate:
-            beta       = 10*beta
 
-            #incs   = jax.vmap( ode, in_axes = (0,None,None, None, None, None,None,None,None,None,None,None,None) )( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0 )
-            incs   = ode( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0,ntimes )
+
+            z__beta =  numpyro.sample("z__beta", dist.Normal(0,1) )
+            beta    =  10*jax.scipy.special.expit(beta + z__beta*beta_sigma)
+
+            z__center =  numpyro.sample("z__center", dist.Normal(0,1) )
+            center    = 33*jax.scipy.special.expit(center + z__center*center_sigma)
+
+            z__spread =  numpyro.sample("z__spread", dist.Normal(0,1) )
+            spread    = 33*jax.scipy.special.expit(spread + z__spread*spread_sigma)
+ 
+            incs   = jax.vmap( ode, in_axes = (0,0,0, None, None, None,None,None,None,None,None,None,None) )( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0 )
+            #incs   = ode( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0,ntimes )
 
             weights_for_rw   = numpyro.sample("weights_for_rw"  , dist.TruncatedNormal( jax.scipy.special.logit(0.95), weights_for_rw__strength
                                                                                         , low = jax.scipy.special.logit(0.02), high=jax.scipy.special.logit(0.98)   ) )
@@ -224,6 +233,8 @@ def fit(data,hj_predictions):
              )
     samples =  mcmc.get_samples()
 
+    print(mcmc.print_summary())
+    
     predictive  = Predictive(model, posterior_samples=samples)
     predictions = predictive(rng_key
                              , data =  training_data
