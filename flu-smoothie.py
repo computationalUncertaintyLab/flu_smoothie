@@ -95,63 +95,50 @@ def fit(data,hj_predictions):
         #@jit
         # Set up the ODE term for the differential equation
       
-        phi           = numpyro.sample("phi", dist.Normal(0,100))
-        phi           = jax.scipy.special.expit(phi)
+        phi           = numpyro.sample("phi", dist.Beta(1,1))
 
-        beta          = numpyro.sample("beta"           , dist.Normal(0,100))
-        beta_sigma    = numpyro.sample("beta_sigma"     , dist.HalfCauchy(100) )
-        
-        gamma1         = numpyro.sample("gamma1"          , dist.Normal(jnp.log(2),100) )
-        gamma1         = jnp.exp(gamma1) 
+        beta           = numpyro.sample("beta"          , dist.Gamma(2,1))
+        gamma1         = numpyro.sample("gamma1"        , dist.Gamma(2,1))
+        gamma2         = numpyro.sample("gamma2"        , dist.Gamma(2,1))
 
-        gamma2         = numpyro.sample("gamma2"          , dist.Normal(jnp.log(2),100) )
-        gamma2         = jnp.exp(gamma2) 
+        eta           = numpyro.sample("eta"            , dist.Beta(1,1) )
+        
+        theta_a          = numpyro.sample("theta_a"     , dist.Gamma(2,1) )
+        theta_b    = numpyro.sample("theta_b"           , dist.Gamma(2,1) ) 
+        
+        center        = numpyro.sample("center"         , dist.Uniform(0,33))
+        
+        spread        = numpyro.sample("spread"         , dist.Uniform(0,33))
+        
+        sigma         = numpyro.sample("sigma"          ,dist.HalfCauchy(10**2))
 
-        eta           = numpyro.sample("eta"            , dist.Normal(0,100) )
-        eta           = jax.scipy.special.expit(eta)
-        
-        theta         = numpyro.sample("theta"          , dist.Normal(jnp.log(2),100) )
-        theta         = jnp.exp(theta) 
-        
-        center        = numpyro.sample("center"         , dist.Normal(0,10**3))
-        center_sigma    = numpyro.sample("center_sigma" , dist.HalfCauchy(100) )
-        
-        #spread        = numpyro.sample("spread"         , dist.Uniform(0,33))
-        spread        = numpyro.sample("spread"         , dist.Normal(0,10**3))
-        spread_sigma    = numpyro.sample("spread_sigma" , dist.HalfCauchy(100) )
-        
-        sigma         = numpyro.sample("sigma",dist.HalfCauchy(100.))
+        inits         = numpyro.sample("inits", dist.Dirichlet( 1*jnp.array([1,1,1,1,1]))) 
 
-        inits         = numpyro.sample("inits", dist.Dirichlet(jnp.array([1,1,1,1,1,1]))) 
-        S0,E0,I0,R0,H0,h0 = inits
-
+        E0,I0,R0,H0,h0 = inits*0.10
+        S0             = jnp.array([0.90])
+        
         #--season level
+        sigma_rw                =  numpyro.sample("sigma_rw"          , dist.Gamma(2,0.2) )
+        increments_season       =  numpyro.sample("increments_season" , dist.Normal(0,1./jnp.sqrt(sigma_rw)).expand([1,32]) )
+        #increments_season_begin =  numpyro.sample("increments_season_begin" , dist.Normal(0,1./jnp.sqrt(10*sigma_rw)).expand([1,1]) )
 
-        prec_a, prec_b    =  numpyro.sample("prec_a"            , dist.Exponential(100**2) ), numpyro.sample("prec_b"       , dist.Exponential(1) )
-        sigma_rw          =  numpyro.sample("sigma_rw"          , dist.Gamma(prec_a, prec_b) )
-        increments_season =  numpyro.sample("increments_season" , dist.Normal(0,1./jnp.sqrt(sigma_rw)).expand([1,33]) )
+        increments_season_begin =  jnp.array([0.]).reshape(1,1)
+        increments_season       =  jnp.hstack([increments_season_begin, increments_season]) 
+        
         z_season          =  jnp.cumsum(increments_season,axis=-1)[:,::-1]
 
-
         weights_for_rw__strength  = numpyro.sample("weights_for_rw__strength", dist.Gamma(2,2) )
-        prec_as                   = numpyro.sample("prec_as", dist.Gamma( 5,1) )
-        prec_bs                   = numpyro.sample("prec_bs", dist.Gamma( 1,10 ) )
+
+        prec_as                   = numpyro.sample("prec_as", dist.Gamma( 10,1) )
+        prec_bs                   = numpyro.sample("prec_bs", dist.Gamma( 1,5 ) )
         with season_plate:
 
-
-            z__beta =  numpyro.sample("z__beta", dist.Normal(0,1) )
-            beta    =  10*jax.scipy.special.expit(beta + z__beta*beta_sigma)
-
-            z__center =  numpyro.sample("z__center", dist.Normal(0,1) )
-            center    = 33*jax.scipy.special.expit(center + z__center*center_sigma)
-
-            z__spread =  numpyro.sample("z__spread", dist.Normal(0,1) )
-            spread    = 33*jax.scipy.special.expit(spread + z__spread*spread_sigma)
- 
-            incs   = jax.vmap( ode, in_axes = (0,0,0, None, None, None,None,None,None,None,None,None,None) )( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0 )
+            theta    = numpyro.sample("theta_season", dist.Gamma(theta_a, theta_b))
+            
+            incs   = jax.vmap( ode, in_axes = (None,None,None, None, None,0,None,None,None,None,None,None,None,None) )( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0, ntimes )
             #incs   = ode( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0,ntimes )
 
-            weights_for_rw   = numpyro.sample("weights_for_rw"  , dist.TruncatedNormal( jax.scipy.special.logit(0.95), weights_for_rw__strength
+            weights_for_rw   = numpyro.sample("weights_for_rw"  , dist.TruncatedNormal( jax.scipy.special.logit(0.5), weights_for_rw__strength
                                                                                         , low = jax.scipy.special.logit(0.02), high=jax.scipy.special.logit(0.98)   ) )
             weights_for_rw   = jax.scipy.special.expit(weights_for_rw)
 
@@ -161,21 +148,17 @@ def fit(data,hj_predictions):
                                                                      ,init = weight
                                                                      ,xs   = jnp.arange(ntimes) )[-1]  ) (weights_for_rw)
             weights_for_rw = weights_for_rw.reshape(nseasons,ntimes)
-            random_walk_sigma           = numpyro.sample("random_walk_sigma", dist.Gamma( prec_as, prec_bs ) )
+            random_walk_sigma           = numpyro.sample("random_walk_sigma", dist.HalfNormal(100))# dist.Gamma( prec_as, prec_bs ) )
 
             with times_plate:
                 increments              = numpyro.sample("increments_for_time" , dist.Normal(0, 1./jnp.sqrt(random_walk_sigma)))
-                increments              = increments.at[:,0].set( -jax.scipy.special.logit( jnp.repeat(incs[-1], nseasons) ) ) #--this makes sure the sum below end at logit(season)
+                increments              = increments.at[:,0].set( -jax.scipy.special.logit(incs[:,-1])  ) #--this makes sure the sum below end at logit(season)
 
-                #print(increments)
-                
                 increments              = increments*weights_for_rw
                 random_walk_adjustment  = jnp.cumsum(increments,axis=-1)[:,::-1]
 
-                #print(random_walk_adjustment)
-
-                N = final_size*10
-                curve =  (phi*(N) )*( eps + jax.scipy.special.expit( jax.scipy.special.logit(incs) + z_season + random_walk_adjustment  ) )
+                N = final_size*100
+                curve =  (phi*(N) )*( eps + jax.scipy.special.expit( jax.scipy.special.logit(incs)  ))#+   z_season + random_walk_adjustment ) )
 
                 numpyro.deterministic("curve", curve)
                 
@@ -208,10 +191,12 @@ def fit(data,hj_predictions):
                   , final_size = final_size
                  )
         samples__init = mcmc_init.get_samples()
+
+        print(mcmc_init.print_summary())
         
         init_params = {name: np.mean(value,0) for name, value in samples__init.items()}
         return init_params
-    init_params = initialrun()
+    #init_params = initialrun()
 
     #--now with users
     mcmc = MCMC(
@@ -219,8 +204,8 @@ def fit(data,hj_predictions):
          , dense_mass             = False
          , max_tree_depth         = 2
          , regularize_mass_matrix = True
-         , init_strategy          = init_to_value(values = init_params))
-    , num_warmup  = 500
+         , init_strategy          = init_to_value())# init_to_value(values = init_params))
+    , num_warmup  = 1000
     , num_samples = 3000
     , num_chains  = 1
     , thinning    = 2
@@ -241,6 +226,7 @@ def fit(data,hj_predictions):
                              , final_size = final_size
                              )
     
+    print(predictions["curve"].shape)
     _2p5,_10,_25,_50,_75,_90,_97p5 = np.percentile( predictions["curve"][:,-1,:] , [2.5,10,25,50,75,90,97.5], axis=0 )
     print(_50)
     forecast_data =  pd.DataFrame({ "eweek":np.arange(1,33+1), "_2p5":_2p5, "_10":_10,"_25":_25, "_75":_75,"_90":_90, "_97p5":_97p5, "_50":_50 } )
