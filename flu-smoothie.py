@@ -129,8 +129,8 @@ def fit(data,hj_predictions):
 
         weights_for_rw__strength  = numpyro.sample("weights_for_rw__strength", dist.Gamma(2,2) )
 
-        prec_as                   = numpyro.sample("prec_as", dist.Gamma( 10,1) )
-        prec_bs                   = numpyro.sample("prec_bs", dist.Gamma( 1,5 ) )
+        prec_as                   = numpyro.sample("prec_as", dist.Gamma( 1,1) )
+        prec_bs                   = numpyro.sample("prec_bs", dist.Gamma( 1,1 ) )
         with season_plate:
 
             theta    = numpyro.sample("theta_season", dist.Gamma(theta_a, theta_b))
@@ -138,7 +138,7 @@ def fit(data,hj_predictions):
             incs   = jax.vmap( ode, in_axes = (None,None,None, None, None,0,None,None,None,None,None,None,None,None) )( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0, ntimes )
             #incs   = ode( beta,center,spread,gamma1,gamma2,theta,eta,S0,E0,I0,R0,H0,h0,ntimes )
 
-            weights_for_rw   = numpyro.sample("weights_for_rw"  , dist.TruncatedNormal( jax.scipy.special.logit(0.5), weights_for_rw__strength
+            weights_for_rw   = numpyro.sample("weights_for_rw"  , dist.TruncatedNormal( jax.scipy.special.logit(0.95), weights_for_rw__strength
                                                                                         , low = jax.scipy.special.logit(0.02), high=jax.scipy.special.logit(0.98)   ) )
             weights_for_rw   = jax.scipy.special.expit(weights_for_rw)
 
@@ -148,17 +148,17 @@ def fit(data,hj_predictions):
                                                                      ,init = weight
                                                                      ,xs   = jnp.arange(ntimes) )[-1]  ) (weights_for_rw)
             weights_for_rw = weights_for_rw.reshape(nseasons,ntimes)
-            random_walk_sigma           = numpyro.sample("random_walk_sigma", dist.HalfNormal(100))# dist.Gamma( prec_as, prec_bs ) )
+            random_walk_sigma           = numpyro.sample("random_walk_sigma", dist.HalfNormal(10))# dist.Gamma( prec_as, prec_bs ) )
 
             with times_plate:
                 increments              = numpyro.sample("increments_for_time" , dist.Normal(0, 1./jnp.sqrt(random_walk_sigma)))
-                increments              = increments.at[:,0].set( -jax.scipy.special.logit(incs[:,-1])  ) #--this makes sure the sum below end at logit(season)
+                increments              = increments.at[:,0].set( 0 ) #--this makes sure the sum below end at logit(season)
 
                 increments              = increments*weights_for_rw
                 random_walk_adjustment  = jnp.cumsum(increments,axis=-1)[:,::-1]
 
                 N = final_size*100
-                curve =  (phi*(N) )*( eps + jax.scipy.special.expit( jax.scipy.special.logit(incs)  ))#+   z_season + random_walk_adjustment ) )
+                curve =  (phi*(N) )*( eps + jax.scipy.special.expit( jax.scipy.special.logit(incs) + z_season + random_walk_adjustment ))
 
                 numpyro.deterministic("curve", curve)
                 
